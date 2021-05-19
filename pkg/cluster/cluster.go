@@ -261,19 +261,36 @@ func (c *Cluster) checkServices() error {
 	var (
 		// mustCreateClientService indicates whether we must create the client service.
 		mustCreateClientService bool
+		serviceChanged bool
+
 		// mustCreateManagementService indicates whether we must create the management service.
 		mustCreateManagementService bool
+
+		managementServiceChanged bool
 	)
 
+	var labels, annotations map[string]string
+	if c.cluster.Spec.ServicePolicy != nil {
+		labels = c.cluster.Spec.ServicePolicy.Labels
+		annotations = c.cluster.Spec.ServicePolicy.Annotations
+	}
+
 	// Check whether the client service already exists.
-	if _, err := c.config.ServiceLister.Services(c.cluster.Namespace).Get(kubernetesutil.ClientServiceName(c.cluster.Name)); err != nil {
-		if kubernetesutil.IsKubernetesResourceNotFoundError(err) {
-			// The client service does not exist, so we must create it.
-			mustCreateClientService = true
-		} else {
-			// We've got an unexpected error while getting the service.
-			return err
+	svc, err := c.config.ServiceLister.Services(c.cluster.Namespace).Get(kubernetesutil.ClientServiceName(c.cluster.Name))
+	if svc == nil {
+		if err != nil {
+			if kubernetesutil.IsKubernetesResourceNotFoundError(err) {
+				// The client service does not exist, so we must create it.
+				mustCreateClientService = true
+			} else {
+				// We've got an unexpected error while getting the service.
+				return err
+			}
 		}
+	} else {
+		serviceChanged = !reflect.DeepEqual(annotations, svc.GetAnnotations())
+		serviceChanged = managementServiceChanged || !reflect.DeepEqual(labels, svc.GetLabels())
+		// TODO: Check Everything else
 	}
 
 	var websocketPort, gatewayPort, leafnodePort int
@@ -287,15 +304,9 @@ func (c *Cluster) checkServices() error {
 		leafnodePort = c.cluster.Spec.LeafNodeConfig.Port
 	}
 
-	var labels, annotations map[string]string
-	if c.cluster.Spec.ServicePolicy != nil {
-		labels = c.cluster.Spec.ServicePolicy.Labels
-		annotations = c.cluster.Spec.ServicePolicy.Annotations
-	}
-
 	// Create the client service if required.
-	if mustCreateClientService {
-		err := kubernetesutil.CreateClientService(
+	if mustCreateClientService || serviceChanged {
+		err := kubernetesutil.SyncClientService(
 			c.config.KubeCli,
 			c.cluster.Name,
 			c.cluster.Namespace,
@@ -303,19 +314,9 @@ func (c *Cluster) checkServices() error {
 			websocketPort,
 			labels,
 			annotations,
+			svc != nil,
 		)
 		if err != nil {
-			return err
-		}
-	}
-
-	// Check whether we need to create the management service.
-	if _, err := c.config.ServiceLister.Services(c.cluster.Namespace).Get(kubernetesutil.ManagementServiceName(c.cluster.Name)); err != nil {
-		if kubernetesutil.IsKubernetesResourceNotFoundError(err) {
-			// The management service does not exist, so we must create it.
-			mustCreateManagementService = true
-		} else {
-			// We've got an unexpected error while getting the service.
 			return err
 		}
 	}
@@ -326,9 +327,25 @@ func (c *Cluster) checkServices() error {
 		mgmtAnnotations = c.cluster.Spec.ManagementServicePolicy.Annotations
 	}
 
+	// Check whether we need to create the management service.
+	mgmtSvc, err := c.config.ServiceLister.Services(c.cluster.Namespace).Get(kubernetesutil.ManagementServiceName(c.cluster.Name))
+	if mgmtSvc == nil {
+		if kubernetesutil.IsKubernetesResourceNotFoundError(err) {
+			// The management service does not exist, so we must create it.
+			mustCreateManagementService = true
+		} else {
+			// We've got an unexpected error while getting the service.
+			return err
+		}
+	} else {
+		managementServiceChanged = !reflect.DeepEqual(mgmtAnnotations, mgmtSvc.GetAnnotations())
+		managementServiceChanged = managementServiceChanged || !reflect.DeepEqual(mgmtLabels, mgmtSvc.GetLabels())
+		// TODO: Check Ports too
+	}
+
 	// Create the management service if required.
-	if mustCreateManagementService {
-		err := kubernetesutil.CreateMgmtService(
+	if mustCreateManagementService || managementServiceChanged {
+		err := kubernetesutil.SyncMgmtService(
 			c.config.KubeCli,
 			c.cluster.Name,
 			c.cluster.Spec.Version,
@@ -339,6 +356,7 @@ func (c *Cluster) checkServices() error {
 			leafnodePort,
 			mgmtLabels,
 			mgmtAnnotations,
+			mgmtSvc != nil,
 		)
 		if err != nil {
 			return err

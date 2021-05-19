@@ -89,10 +89,37 @@ func PodWithNodeSelector(p *v1.Pod, ns map[string]string) *v1.Pod {
 	return p
 }
 
-func createService(kubecli corev1client.CoreV1Interface, svcName, clusterName, ns, clusterIP string, ports []v1.ServicePort, owner metav1.OwnerReference, selectors map[string]string, tolerateUnready bool, labels map[string]string, annotations map[string]string) error {
+func createServiceManifest(
+	svcName string,
+	clusterName string,
+	clusterIP string,
+	ports []v1.ServicePort,
+	owner metav1.OwnerReference,
+	selectors map[string]string,
+	tolerateUnready bool,
+	labels map[string]string,
+	annotations map[string]string,
+) *v1.Service {
 	svc := newNatsServiceManifest(svcName, clusterName, clusterIP, ports, selectors, tolerateUnready, labels, annotations)
 	addOwnerRefToObject(svc.GetObjectMeta(), owner)
+	return svc
+}
+
+func createService(
+	kubecli corev1client.CoreV1Interface,
+	ns string,
+	svc *v1.Service,
+) error {
 	_, err := kubecli.Services(ns).Create(svc)
+	return err
+}
+
+func updateService(
+	kubecli corev1client.CoreV1Interface,
+	ns string,
+	svc *v1.Service,
+) error {
+	_, err := kubecli.Services(ns).Update(svc)
 	return err
 }
 
@@ -101,13 +128,14 @@ func ClientServiceName(clusterName string) string {
 	return clusterName
 }
 
-func CreateClientService(
+func SyncClientService(
 	kubecli corev1client.CoreV1Interface,
 	clusterName, ns string,
 	owner metav1.OwnerReference,
 	websocketPort int,
 	labels map[string]string,
 	annotations map[string]string,
+	exists bool,
 ) error {
 	ports := []v1.ServicePort{
 		{
@@ -127,15 +155,19 @@ func CreateClientService(
 	}
 
 	selectors := LabelsForCluster(clusterName)
-	return createService(kubecli, ClientServiceName(clusterName), clusterName, ns, "", ports, owner, selectors, false, labels, annotations)
+	var svc = createServiceManifest(ManagementServiceName(clusterName), clusterName, v1.ClusterIPNone, ports, owner, selectors, true, labels, annotations)
+	if exists {
+		return updateService(kubecli, ns, svc)
+	}
+	return createService(kubecli, ns, svc)
 }
 
 func ManagementServiceName(clusterName string) string {
 	return clusterName + "-mgmt"
 }
 
-// CreateMgmtService creates an headless service for NATS management purposes.
-func CreateMgmtService(
+// SyncMgmtService creates an headless service for NATS management purposes.
+func SyncMgmtService(
 	kubecli corev1client.CoreV1Interface,
 	clusterName, clusterVersion, ns string,
 	owner metav1.OwnerReference,
@@ -144,6 +176,7 @@ func CreateMgmtService(
 	leafnodePort int,
 	labels map[string]string,
 	annotations map[string]string,
+	exists bool,
 ) error {
 	ports := []v1.ServicePort{
 		{
@@ -192,7 +225,11 @@ func CreateMgmtService(
 
 	selectors := LabelsForCluster(clusterName)
 	selectors[LabelClusterVersionKey] = clusterVersion
-	return createService(kubecli, ManagementServiceName(clusterName), clusterName, ns, v1.ClusterIPNone, ports, owner, selectors, true, labels, annotations)
+	var svc = createServiceManifest(ManagementServiceName(clusterName), clusterName, v1.ClusterIPNone, ports, owner, selectors, true, labels, annotations)
+	if exists {
+		return updateService(kubecli, ns, svc)
+	}
+	return createService(kubecli, ns, svc)
 }
 
 // addTLSConfig fills in the TLS configuration to be used in the config map.
