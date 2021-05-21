@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/imdario/mergo"
+	log "github.com/sirupsen/logrus"
 	"net"
 	"os"
 	"path/filepath"
@@ -89,7 +91,8 @@ func PodWithNodeSelector(p *v1.Pod, ns map[string]string) *v1.Pod {
 	return p
 }
 
-func createServiceManifest(
+func syncServiceManifest(
+	svc *v1.Service,
 	svcName string,
 	clusterName string,
 	clusterIP string,
@@ -100,7 +103,7 @@ func createServiceManifest(
 	labels map[string]string,
 	annotations map[string]string,
 ) *v1.Service {
-	svc := newNatsServiceManifest(svcName, clusterName, clusterIP, ports, selectors, tolerateUnready, labels, annotations)
+	svc = syncNatsServiceManifest(svc, svcName, clusterName, clusterIP, ports, selectors, tolerateUnready, labels, annotations)
 	addOwnerRefToObject(svc.GetObjectMeta(), owner)
 	return svc
 }
@@ -119,7 +122,24 @@ func updateService(
 	ns string,
 	svc *v1.Service,
 ) error {
-	_, err := kubecli.Services(ns).Update(svc)
+
+	cur, err2 := kubecli.Services(ns).Get(svc.Name, metav1.GetOptions{})
+	if err2 != nil {
+		return err2
+	}
+	log.Errorf("CUR ID IS %v", cur.UID)
+	log.Errorf("SVC ID IS %v", svc.UID)
+
+	svc.SetUID("")
+	svc.SetResourceVersion("")
+
+	err := mergo.Merge(cur, svc)
+
+	if err != nil {
+		return err
+	}
+
+	_, err = kubecli.Services(ns).Update(cur)
 	return err
 }
 
@@ -129,13 +149,13 @@ func ClientServiceName(clusterName string) string {
 }
 
 func SyncClientService(
+	svc *v1.Service,
 	kubecli corev1client.CoreV1Interface,
 	clusterName, ns string,
 	owner metav1.OwnerReference,
 	websocketPort int,
 	labels map[string]string,
 	annotations map[string]string,
-	exists bool,
 ) error {
 	ports := []v1.ServicePort{
 		{
@@ -155,10 +175,16 @@ func SyncClientService(
 	}
 
 	selectors := LabelsForCluster(clusterName)
-	var svc = createServiceManifest(ManagementServiceName(clusterName), clusterName, v1.ClusterIPNone, ports, owner, selectors, true, labels, annotations)
+	var exists = svc != nil
+
+	log.Errorf("EXISTS? %t", exists)
+
+	svc = syncServiceManifest(svc, ManagementServiceName(clusterName), clusterName, v1.ClusterIPNone, ports, owner, selectors, true, labels, annotations)
 	if exists {
+		log.Errorf("UPDATE %v", svc)
 		return updateService(kubecli, ns, svc)
 	}
+	log.Errorf("CREATE")
 	return createService(kubecli, ns, svc)
 }
 
@@ -168,6 +194,7 @@ func ManagementServiceName(clusterName string) string {
 
 // SyncMgmtService creates an headless service for NATS management purposes.
 func SyncMgmtService(
+	svc *v1.Service,
 	kubecli corev1client.CoreV1Interface,
 	clusterName, clusterVersion, ns string,
 	owner metav1.OwnerReference,
@@ -176,7 +203,6 @@ func SyncMgmtService(
 	leafnodePort int,
 	labels map[string]string,
 	annotations map[string]string,
-	exists bool,
 ) error {
 	ports := []v1.ServicePort{
 		{
@@ -225,11 +251,19 @@ func SyncMgmtService(
 
 	selectors := LabelsForCluster(clusterName)
 	selectors[LabelClusterVersionKey] = clusterVersion
-	var svc = createServiceManifest(ManagementServiceName(clusterName), clusterName, v1.ClusterIPNone, ports, owner, selectors, true, labels, annotations)
+
+	var exists = svc != nil
+	log.Errorf("EXISTS? %t", exists)
+
+	svc = syncServiceManifest(svc, ManagementServiceName(clusterName), clusterName, v1.ClusterIPNone, ports, owner, selectors, true, labels, annotations)
 	if exists {
+		log.Errorf("UPDATE")
 		return updateService(kubecli, ns, svc)
 	}
+	log.Errorf("CREATE")
 	return createService(kubecli, ns, svc)
+
+
 }
 
 // addTLSConfig fills in the TLS configuration to be used in the config map.
@@ -905,7 +939,7 @@ func newNatsPidFileVolumeMount() v1.VolumeMount {
 	}
 }
 
-func newNatsServiceManifest(svcName, clusterName, clusterIP string, ports []v1.ServicePort, selectors map[string]string, tolerateUnready bool, labels map[string]string, annotations map[string]string) *v1.Service {
+func syncNatsServiceManifest(svc *v1.Service, svcName, clusterName, clusterIP string, ports []v1.ServicePort, selectors map[string]string, tolerateUnready bool, labels map[string]string, annotations map[string]string) *v1.Service {
 
 	if labels == nil {
 		labels = make(map[string]string)
@@ -919,19 +953,18 @@ func newNatsServiceManifest(svcName, clusterName, clusterIP string, ports []v1.S
 	if tolerateUnready == true {
 		annotations[TolerateUnreadyEndpointsAnnotation] = "true"
 	}
-
-	svc := &v1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        svcName,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-		Spec: v1.ServiceSpec{
-			Ports:     ports,
-			Selector:  selectors,
-			ClusterIP: clusterIP,
-		},
+	if svc == nil {
+		svc = &v1.Service{}
 	}
+
+	svc.ObjectMeta.Name = svcName
+	svc.ObjectMeta.Labels = labels
+	svc.ObjectMeta.Annotations = annotations
+
+	svc.Spec.Ports = ports
+	svc.Spec.Selector = selectors
+	svc.Spec.ClusterIP = clusterIP
+
 	return svc
 }
 

@@ -290,6 +290,8 @@ func (c *Cluster) checkServices() error {
 	} else {
 		serviceChanged = !reflect.DeepEqual(annotations, svc.GetAnnotations())
 		serviceChanged = managementServiceChanged || !reflect.DeepEqual(labels, svc.GetLabels())
+
+		c.logger.Infof("Service changed?: %t", serviceChanged)
 		// TODO: Check Everything else
 	}
 
@@ -306,7 +308,9 @@ func (c *Cluster) checkServices() error {
 
 	// Create the client service if required.
 	if mustCreateClientService || serviceChanged {
+		c.logger.Info("Syncing service")
 		err := kubernetesutil.SyncClientService(
+			svc,
 			c.config.KubeCli,
 			c.cluster.Name,
 			c.cluster.Namespace,
@@ -314,7 +318,6 @@ func (c *Cluster) checkServices() error {
 			websocketPort,
 			labels,
 			annotations,
-			svc != nil,
 		)
 		if err != nil {
 			return err
@@ -341,11 +344,15 @@ func (c *Cluster) checkServices() error {
 		managementServiceChanged = !reflect.DeepEqual(mgmtAnnotations, mgmtSvc.GetAnnotations())
 		managementServiceChanged = managementServiceChanged || !reflect.DeepEqual(mgmtLabels, mgmtSvc.GetLabels())
 		// TODO: Check Ports too
+
+		c.logger.Infof("Management Service changed?: %t", serviceChanged)
 	}
 
 	// Create the management service if required.
 	if mustCreateManagementService || managementServiceChanged {
+		c.logger.Info("Syncing management service")
 		err := kubernetesutil.SyncMgmtService(
+			mgmtSvc,
 			c.config.KubeCli,
 			c.cluster.Name,
 			c.cluster.Spec.Version,
@@ -356,7 +363,6 @@ func (c *Cluster) checkServices() error {
 			leafnodePort,
 			mgmtLabels,
 			mgmtAnnotations,
-			mgmtSvc != nil,
 		)
 		if err != nil {
 			return err
